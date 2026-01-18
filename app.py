@@ -1,66 +1,38 @@
-# app.py
-from flask import Flask, render_template, request, send_file
+from flask import Flask, request, jsonify
 from pathlib import Path
+import tempfile
 import os
-from web import convert_pdfs_to_excel  # your converter.py
 
-# ---------------------------
-# App setup
-# ---------------------------
-app = Flask(__name__, template_folder="templates")
+from web import convert_pdf_to_dataframe
 
-UPLOAD_DIR = Path("uploads")
-OUTPUT_DIR = Path("outputs")
+app = Flask(__name__)
 
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+API_KEY = os.environ.get("API_KEY", "dev-key")  # set on Render
 
-# ---------------------------
-# Routes
-# ---------------------------
-@app.route("/", methods=["GET", "POST"])
-def index():
-    if request.method == "POST":
-        files = request.files.getlist("pdfs")
-        if not files or files[0].filename == "":
-            return "No PDF files selected!", 400
+@app.route("/api/convert", methods=["POST"])
+def convert_api():
+    # Security
+    if request.headers.get("X-API-KEY") != API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
 
-        pdf_paths = []
-        for f in files:
-            path = UPLOAD_DIR / f.filename
-            f.save(path)
-            pdf_paths.append(path)
-        print(f"[DEBUG] Saved PDFs: {[p.name for p in pdf_paths]}")
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
 
-        # Convert PDFs to Excel
-        try:
-            excel_file = convert_pdfs_to_excel(pdf_paths, OUTPUT_DIR)
-        except Exception as e:
-            print(f"[ERROR] PDF to Excel conversion failed: {e}")
-            return "Failed to process PDF files", 500
+    file = request.files["file"]
 
-        # Clean uploaded PDFs after processing
-        for pdf_path in pdf_paths:
-            pdf_path.unlink(missing_ok=True)
-        print(f"[DEBUG] Cleaned uploaded PDFs")
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf_path = Path(tmp) / file.filename
+        file.save(pdf_path)
 
-        if excel_file is None or not excel_file.exists():
-            print(f"[ERROR] Excel file not found: {excel_file}")
-            return "Failed to process PDF files", 500
+        df = convert_pdf_to_dataframe(pdf_path)
 
-        print(f"[INFO] Sending Excel file: {excel_file}")
-        return send_file(
-            str(excel_file.resolve()),  # absolute path
-            as_attachment=True,
-            download_name=excel_file.name
-        )
+        if df is None or df.empty:
+            return jsonify({"error": "Conversion failed"}), 500
 
-    return render_template("index.html")
+        return jsonify({
+            "status": "success",
+            "rows": df.values.tolist()
+        })
 
-
-# ---------------------------
-# Run (local testing)
-# ---------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run()
